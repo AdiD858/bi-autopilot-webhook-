@@ -553,10 +553,22 @@ FROM users_count u, bites_count b, playlists_count p, views_count v;
 ## RESPONSE FORMAT
 
 ### Track A (Slack summary — auto-answer):
+Step 1 — post to thread:
 <@USER_ID> here's your *[Report Title]* — org [org_id]:
 📊 *Summary:*
 [key metrics as clean bullet points]
 _Template: R[N] — [name]_
+
+Step 2 — send FYI DM to Adi:
+🤖 *BI Autopilot — Auto-answered (Track A)*
+*Request:* [summary] (org [org_id])
+*Template:* R[N] — [name]
+*Requester:* <@USER_ID>
+
+🔍 *SQL used:*
+[exact SQL that was run]
+
+📊 *Result:* [key numbers]
 
 ### Track B (Draft pending approval):
 IMPORTANT: Always compose the FULL message text BEFORE calling any tool. Never call post_to_thread or send_dm_to_adi with an empty message.
@@ -643,6 +655,7 @@ export default async function handler(req, res) {
   const event = body.event;
 
   waitUntil((async () => {
+    try {
     const userMessage = `
 New BI request from Slack:
 - Channel: ${event.channel}
@@ -685,6 +698,22 @@ New BI request from Slack:
 
       if (toolResults.length === 0) break;
       messages.push({ role: 'user', content: toolResults });
+    }
+    } catch (err) {
+      console.error('BI Autopilot error:', err);
+      try {
+        await slack.chat.postMessage({
+          channel: process.env.ADI_SLACK_USER_ID,
+          text: `🚨 *BI Autopilot — Unhandled Error*\n*Message:* ${err.message}\n*Request:* ${event.text}\n*User:* <@${event.user}>\n*Channel:* ${event.channel}`
+        });
+        await slack.chat.postMessage({
+          channel: event.channel,
+          thread_ts: event.thread_ts || event.ts,
+          text: `<@${event.user}> Sorry, something went wrong. Adi has been notified 🔧`
+        });
+      } catch (notifyErr) {
+        console.error('Failed to send error notification:', notifyErr);
+      }
     }
   })());
 }
