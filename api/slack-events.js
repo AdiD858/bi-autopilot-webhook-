@@ -290,6 +290,30 @@ SELECT 'dropoff', NULL, NULL, NULL, NULL, NULL, d.last_bite_order, d.users_stopp
 FROM dropoff d ORDER BY result_type, last_bite_order;`
 };
 
+// ── CSV helpers ───────────────────────────────────────────────────────────────
+function rowsToCsv(rows) {
+  if (!rows || rows.length === 0) return '';
+  const headers = Object.keys(rows[0]);
+  const escape = v => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return s.includes(',') || s.includes('"') || s.includes('\n')
+      ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [headers.join(','), ...rows.map(r => headers.map(h => escape(r[h])).join(','))].join('\n');
+}
+
+async function uploadCsvToSlack({ channel, thread_ts, filename, csvContent, title }) {
+  await slack.filesUploadV2({
+    channel_id: channel,
+    thread_ts,
+    filename: `${filename}.csv`,
+    content: csvContent,
+    title,
+    initial_comment: ''
+  });
+}
+
 // ── Run a named template ──────────────────────────────────────────────────────
 async function runTemplate(templateId, params) {
   if (templateId === 'R17') {
@@ -333,6 +357,21 @@ const TOOLS = [
     }
   },
   {
+    name: 'upload_csv',
+    description: 'Upload a CSV file to the Slack thread. Use for ALL Track B reports after running use_template.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        channel_id: { type: 'string' },
+        thread_ts:  { type: 'string' },
+        filename:   { type: 'string', description: 'e.g. R17_Castro_2025' },
+        title:      { type: 'string', description: 'Human-readable title for the file' },
+        result_key: { type: 'string', description: 'Pass the exact value "last_template_result" — the code will use the last template rows' }
+      },
+      required: ['channel_id', 'thread_ts', 'filename', 'title', 'result_key']
+    }
+  },
+  {
     name: 'run_sql',
     description: 'Run a custom read-only SQL query. Use ONLY for Track D (free queries not covered by templates).',
     input_schema: {
@@ -366,11 +405,30 @@ const TOOLS = [
 ];
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
+let _lastTemplateRows = [];
+
 async function executeTool(name, input) {
   if (name === 'use_template') {
     try {
       const result = await runTemplate(input.template_id, input.params);
-      return result;
+      _lastTemplateRows = result.rows || [];
+      return { row_count: result.row_count, sql: result.sql, note: 'rows ready — call upload_csv to send as file' };
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+
+  if (name === 'upload_csv') {
+    try {
+      const csv = rowsToCsv(_lastTemplateRows);
+      await uploadCsvToSlack({
+        channel: input.channel_id,
+        thread_ts: input.thread_ts,
+        filename: input.filename,
+        title: input.title,
+        csvContent: csv
+      });
+      return { ok: true, rows_exported: _lastTemplateRows.length };
     } catch (err) {
       return { error: err.message };
     }
@@ -419,6 +477,7 @@ You are BI Autopilot, an automated BI reporting agent for Bites — a mobile-fir
 
 ## YOUR TOOLS
 - use_template: run a predefined report template (R1/R2/R3/R5/R16/R17/R20/R20b)
+- upload_csv: upload results as CSV file to Slack thread (Track B always)
 - run_sql: run a custom SQL query (Track D only)
 - post_to_thread: post a reply in the Slack thread
 - send_dm_to_adi: send Adi a private DM
@@ -431,7 +490,8 @@ Action: use_template → post answer to thread → send FYI DM to Adi with SQL +
 
 ### Track B — PENDING_APPROVAL
 When: R17, R1, R3, R5, R20, R20b — OR result > 30 rows — OR output = CSV/Excel/Google Sheet
-Action: use_template → post SHORT summary to thread → DM Adi with full tab-separated data + SQL + "APPROVE/SKIP"
+Action: use_template → upload_csv to thread → post SHORT summary to thread → DM Adi with SQL + row count + "APPROVE/SKIP"
+NOTE: Do NOT put raw data rows in the DM — the CSV file in the thread contains the full data.
 
 ### Track D — FREE_QUERY
 When: valid BI question, org_id known, does NOT match any template
@@ -499,11 +559,10 @@ _Template: R[N] — [name]_
 *Request:* [summary] (org [org_id])
 *Template:* R[N] — [name]
 *Requester:* <@USER_ID>
+📊 *Results:* [N] rows — CSV file uploaded to thread
 🔍 *SQL:*
 [exact SQL]
-📊 *Results ([N] rows) — copy-paste to Google Sheets:*
-[full tab-separated table with headers]
-Reply *APPROVE* to publish · Reply *SKIP* to discard
+Reply *APPROVE* to publish summary to thread · Reply *SKIP* to discard
 
 ### Track D — post to thread:
 [DRAFT - pending approval] ⏳
